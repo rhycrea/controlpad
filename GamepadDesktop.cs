@@ -22,7 +22,7 @@ namespace GamepadDesktop
         public double DeadzoneLeft = 0.14;         // 14% radial deadzone for left stick
         public double DeadzoneRight = 0.18;        // 18% radial deadzone for right stick
         public double ResponseCurve = 2.15;        // Power curve for smooth precision + fast edge
-        public int ToggleHoldMs = 1000;            // Hold Start + Select for 1000ms to toggle ON/OFF
+        public int ToggleHoldMs = 450;             // Hold Start + Select (or Guide) for 450ms to toggle ON/OFF
         public int PollIntervalMs = 8;             // ~125Hz polling
         public bool StartEnabled = false;          // Default OFF on startup so games/Playnite are never interrupted until user holds Start+Select
         public bool EnableSoundFeedback = true;
@@ -121,10 +121,11 @@ namespace GamepadDesktop
         RThumb    = 1 << 7,
         LB        = 1 << 8,
         RB        = 1 << 9,
-        A         = 1 << 10,
-        B         = 1 << 11,
-        X         = 1 << 12,
-        Y         = 1 << 13
+        Guide     = 1 << 10,
+        A         = 1 << 11,
+        B         = 1 << 12,
+        X         = 1 << 13,
+        Y         = 1 << 14
     }
 
     public struct UnifiedPadState
@@ -161,50 +162,81 @@ namespace GamepadDesktop
             public XINPUT_GAMEPAD Gamepad;
         }
 
-        [UnmanagedFunctionPointer(CallingConvention.StdCall)]
-        private delegate uint XInputGetStateDelegate(uint dwUserIndex, ref XINPUT_STATE pState);
+        [DllImport("xinput1_4.dll", EntryPoint = "#100", CallingConvention = CallingConvention.StdCall)]
+        private static extern uint XInputGetStateEx14(uint dwUserIndex, ref XINPUT_STATE pState);
 
-        private static XInputGetStateDelegate _xinputGetState;
+        [DllImport("xinput1_4.dll", EntryPoint = "XInputGetState", CallingConvention = CallingConvention.StdCall)]
+        private static extern uint XInputGetState14(uint dwUserIndex, ref XINPUT_STATE pState);
 
-        [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
-        private static extern IntPtr LoadLibrary(string lpFileName);
+        [DllImport("xinput9_1_0.dll", EntryPoint = "XInputGetState", CallingConvention = CallingConvention.StdCall)]
+        private static extern uint XInputGetState91(uint dwUserIndex, ref XINPUT_STATE pState);
 
-        [DllImport("kernel32.dll", CharSet = CharSet.Ansi)]
-        private static extern IntPtr GetProcAddress(IntPtr hModule, string procName);
+        [DllImport("kernel32.dll")]
+        public static extern bool Beep(uint dwFreq, uint dwDuration);
+
+        [DllImport("user32.dll")]
+        public static extern bool MessageBeep(uint uType);
 
         [DllImport("psapi.dll")]
         public static extern int EmptyWorkingSet(IntPtr hwProc);
 
-        static NativeMethods()
-        {
-            try
-            {
-                string[] dlls = new string[] { "xinput1_4.dll", "xinput9_1_0.dll", "xinput1_3.dll" };
-                foreach (string dll in dlls)
-                {
-                    IntPtr hMod = LoadLibrary(dll);
-                    if (hMod != IntPtr.Zero)
-                    {
-                        IntPtr proc = GetProcAddress(hMod, "XInputGetState");
-                        if (proc != IntPtr.Zero)
-                        {
-                            _xinputGetState = (XInputGetStateDelegate)Marshal.GetDelegateForFunctionPointer(proc, typeof(XInputGetStateDelegate));
-                            break;
-                        }
-                    }
-                }
-            }
-            catch { }
-        }
+        private static int _xinputMode = 0; // 0 = uninit, 1 = Ex14, 2 = 14, 3 = 91
 
         [HandleProcessCorruptedStateExceptions]
         [SecurityCritical]
         public static uint XInputGetStateSafe(uint dwUserIndex, ref XINPUT_STATE pState)
         {
-            if (_xinputGetState == null) return 1167;
             try
             {
-                return _xinputGetState(dwUserIndex, ref pState);
+                if (_xinputMode <= 1)
+                {
+                    uint res = XInputGetStateEx14(dwUserIndex, ref pState);
+                    _xinputMode = 1;
+                    return res;
+                }
+                else if (_xinputMode == 2)
+                {
+                    return XInputGetState14(dwUserIndex, ref pState);
+                }
+                else
+                {
+                    return XInputGetState91(dwUserIndex, ref pState);
+                }
+            }
+            catch (EntryPointNotFoundException)
+            {
+                try
+                {
+                    uint res = XInputGetState14(dwUserIndex, ref pState);
+                    _xinputMode = 2;
+                    return res;
+                }
+                catch
+                {
+                    try
+                    {
+                        uint res = XInputGetState91(dwUserIndex, ref pState);
+                        _xinputMode = 3;
+                        return res;
+                    }
+                    catch
+                    {
+                        return 1167;
+                    }
+                }
+            }
+            catch (DllNotFoundException)
+            {
+                try
+                {
+                    uint res = XInputGetState91(dwUserIndex, ref pState);
+                    _xinputMode = 3;
+                    return res;
+                }
+                catch
+                {
+                    return 1167;
+                }
             }
             catch
             {
@@ -697,8 +729,8 @@ namespace GamepadDesktop
             int colWidth = 372;
 
             DrawSection(g, col1X, 86, colWidth, "TEMEL MOD & GÜVENLİK (OYUN KORUMASI)", Color.FromArgb(46, 204, 113), new string[,] {
-                { "Start + Select (1 sn)", "Masaüstü Modunu AÇ / KAPAT" },
-                { "Kapalıyken (Oyun Modu)", "Sıfır müdahale! Hiçbir tuş masaüstüne atmaz" },
+                { "Start+Select / Guide / LB+RB+Start", "Masaüstü Modunu AÇ / KAPAT" },
+                { "Oyundayken Aktivasyon", "İstediğiniz an oyundayken de açabilirsiniz" },
                 { "LB + RB (Birlikte Bas)", "Bu Yardım Ekranını Aç / Kapat" }
             });
 
@@ -1030,20 +1062,27 @@ namespace GamepadDesktop
 
             if (_config.EnableSoundFeedback)
             {
-                try
+                bool isEnabled = _desktopModeEnabled;
+                ThreadPool.QueueUserWorkItem(_ =>
                 {
-                    if (_desktopModeEnabled)
+                    try
                     {
-                        Console.Beep(660, 75);
-                        Console.Beep(880, 95);
+                        if (isEnabled)
+                        {
+                            NativeMethods.Beep(660, 60);
+                            NativeMethods.Beep(880, 80);
+                        }
+                        else
+                        {
+                            NativeMethods.Beep(880, 60);
+                            NativeMethods.Beep(440, 90);
+                        }
                     }
-                    else
+                    catch
                     {
-                        Console.Beep(880, 75);
-                        Console.Beep(440, 110);
+                        try { NativeMethods.MessageBeep(0); } catch { }
                     }
-                }
-                catch { }
+                });
             }
 
             string sub = customSubtitle ?? (_desktopModeEnabled
@@ -1293,6 +1332,7 @@ namespace GamepadDesktop
                     if ((b & 0x0080) != 0) combined.Buttons |= PadButtons.RThumb;
                     if ((b & 0x0100) != 0) combined.Buttons |= PadButtons.LB;
                     if ((b & 0x0200) != 0) combined.Buttons |= PadButtons.RB;
+                    if ((b & 0x0400) != 0) combined.Buttons |= PadButtons.Guide;
                     if ((b & 0x1000) != 0) combined.Buttons |= PadButtons.A;
                     if ((b & 0x2000) != 0) combined.Buttons |= PadButtons.B;
                     if ((b & 0x4000) != 0) combined.Buttons |= PadButtons.X;
@@ -1522,21 +1562,26 @@ namespace GamepadDesktop
             PadButtons cur = pad.Buttons;
 
             // ═══════════════════════════════════════════════════════════════════
-            // 1. STRICT START + SELECT (1 SECOND) TOGGLE
-            //    This is the ONLY shortcut active when Desktop Mode is OFF!
-            //    We also require that NO other buttons (no RB, LB, A, B, X, Y) are pressed
-            //    so mortal kombat combos never accidentally trigger anything.
+            // 1. IN-GAME & DESKTOP TOGGLE COMBOS
+            //    Works reliably even inside games without requiring all other buttons released!
+            //    Supported Combos:
+            //      a) Start + Back (Held 450ms)
+            //      b) Guide / Xbox Button (Held 450ms)
+            //      c) LB + RB + Start (Held 250ms — zero in-game conflict)
+            //      d) L3 + R3 (Both Thumbstick Clicks Held 500ms)
             // ═══════════════════════════════════════════════════════════════════
-            PadButtons nonStartBackMask = ~(PadButtons.Start | PadButtons.Back);
-            bool onlyStartAndBackHeld =
-                IsPressed(cur, PadButtons.Start) &&
-                IsPressed(cur, PadButtons.Back) &&
-                ((cur & nonStartBackMask) == PadButtons.None);
+            bool startBackCombo = IsPressed(cur, PadButtons.Start) && IsPressed(cur, PadButtons.Back);
+            bool guideCombo = IsPressed(cur, PadButtons.Guide);
+            bool bumperStartCombo = IsPressed(cur, PadButtons.LB) && IsPressed(cur, PadButtons.RB) && IsPressed(cur, PadButtons.Start);
+            bool stickClickCombo = IsPressed(cur, PadButtons.LThumb) && IsPressed(cur, PadButtons.RThumb);
 
-            if (onlyStartAndBackHeld)
+            bool isToggleComboHeld = startBackCombo || guideCombo || bumperStartCombo || stickClickCombo;
+
+            if (isToggleComboHeld)
             {
                 _startUsedForCombo = true;
                 _backUsedForCombo = true;
+                if (bumperStartCombo) { _lbUsedAsModifier = true; _rbUsedAsModifier = true; }
                 _backPressedTime = DateTime.MinValue;
 
                 if (_altTabActive)
@@ -1545,12 +1590,14 @@ namespace GamepadDesktop
                     _altTabActive = false;
                 }
 
+                int requiredHoldMs = bumperStartCombo ? 250 : Math.Min(_config.ToggleHoldMs, 450);
+
                 if (_comboStartTime == DateTime.MinValue)
                 {
                     _comboStartTime = DateTime.UtcNow;
                     _comboTriggered = false;
                 }
-                else if (!_comboTriggered && (DateTime.UtcNow - _comboStartTime).TotalMilliseconds >= _config.ToggleHoldMs)
+                else if (!_comboTriggered && (DateTime.UtcNow - _comboStartTime).TotalMilliseconds >= requiredHoldMs)
                 {
                     _comboTriggered = true;
                     ToggleDesktopModeManual();
@@ -1567,13 +1614,13 @@ namespace GamepadDesktop
 
             // ═══════════════════════════════════════════════════════════════════
             // 2. WAIT-FOR-RELEASE BARRIER AFTER TOGGLING
-            //    After toggling ON or OFF, ignore all button states until the user
-            //    lets go of all buttons. This guarantees releasing Start/Select never
-            //    sends Enter or Alt+Tab to the game or desktop!
+            //    Wait until the combo trigger buttons are released so releasing
+            //    Start/Select/Bumpers never sends stray inputs.
             // ═══════════════════════════════════════════════════════════════════
             if (_waitForAllButtonsReleased)
             {
-                if (cur == PadButtons.None)
+                PadButtons comboMask = PadButtons.Start | PadButtons.Back | PadButtons.Guide | PadButtons.LB | PadButtons.RB | PadButtons.LThumb | PadButtons.RThumb;
+                if ((cur & comboMask) == PadButtons.None)
                 {
                     _waitForAllButtonsReleased = false;
                 }

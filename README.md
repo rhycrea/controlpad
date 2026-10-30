@@ -26,7 +26,7 @@
 
 | Input / Combo | Desktop Action | Notes |
 | :--- | :--- | :--- |
-| **`Start + Select` (Hold 1s)** | **Toggle Desktop Mode ON / OFF** | Non-focus-stealing Toast + subtle audio cue |
+| **`Start + Select` (Hold 450ms)**<br>*(or **Guide / Xbox** hold)*<br>*(or **`LB + RB + Start`**)*<br>*(or **`L3 + R3`** hold)* | **Toggle Desktop Mode ON / OFF** | Non-focus-stealing Toast + hardware audio cue. Works reliably **even inside full-screen games** without conflicting with in-game controls. |
 | **`LB + RB`** | **Toggle Visual HUD Cheat-Sheet** | Interactive dark-glass overlay |
 | **Left Stick** | **Mouse Cursor Movement** | `2.15` response curve + sub-pixel precision |
 | **Right Stick** | **Vertical & Horizontal Smooth Scroll** | Proportional wheel delta |

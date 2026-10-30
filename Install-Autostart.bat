@@ -29,9 +29,14 @@ if %errorlevel% equ 0 (
 )
 
 echo [3/3] Gorev Zamanlayici ile baslangic gorevi tanimlaniyor...
-schtasks /create /tn "GamepadDesktopController" /tr "\"%EXE_PATH%\"" /sc onlogon /rl limited /f >nul 2>&1
+schtasks /create /tn "GamepadDesktopController" /tr "\"%EXE_PATH%\"" /sc onlogon /rl highest /f >nul 2>&1
 if %errorlevel% equ 0 (
-    echo   - Gorev Zamanlayici basariyla ayarlandi.
+    echo   - Gorev Zamanlayici (Yuksek Yetki / Oyun Uyumlulugu) basariyla ayarlandi.
+) else (
+    schtasks /create /tn "GamepadDesktopController" /tr "\"%EXE_PATH%\"" /sc onlogon /rl limited /f >nul 2>&1
+    if %errorlevel% equ 0 (
+        echo   - Gorev Zamanlayici (Standart Kullanici) basariyla ayarlandi.
+    )
 )
 
 echo.
