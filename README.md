@@ -48,9 +48,17 @@
 
 ---
 
-## 🚀 Quick Start (Zero-Install Build or 1-Click Run)
+## 🚀 Quick Start (Portable Download or 1-Click Build)
 
-### Option 1: Compile & Auto-Start via PowerShell (1 Second)
+### 📦 Option 1: Download Portable Release (Recommended)
+1. Download **`ControlPad-v1.0.0-Portable.zip`** from [GitHub Releases](https://github.com/rhycrea/controlpad/releases/latest).
+2. Extract the archive anywhere on your PC (e.g., `C:\Tools\ControlPad`).
+3. Double-click **`Install-Autostart.bat`** to enable automatic background startup and run it immediately!
+   *(Or simply run `GamepadDesktop.exe` for a one-time portable session)*
+
+---
+
+### 🛠️ Option 2: Compile & Auto-Start via PowerShell (1 Second)
 Every Windows 10/11 machine includes the native `.NET Framework64` C# compiler (`csc.exe`). Clone the repository and run:
 
 ```powershell
@@ -59,7 +67,7 @@ cd controlpad
 powershell -ExecutionPolicy Bypass -File .\install_or_rebuild.ps1
 ```
 
-### Option 2: Direct Manual Compile
+### Option 3: Direct Manual Compile
 ```powershell
 C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe /target:winexe /optimize+ /out:GamepadDesktop.exe /r:System.dll /r:System.Drawing.dll /r:System.Windows.Forms.dll GamepadDesktop.cs
 ```

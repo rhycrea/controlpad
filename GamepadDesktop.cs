@@ -4,7 +4,9 @@ using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.IO;
+using System.Runtime.ExceptionServices;
 using System.Runtime.InteropServices;
+using System.Security;
 using System.Text;
 using System.Threading;
 using System.Windows.Forms;
@@ -163,7 +165,6 @@ namespace GamepadDesktop
         private delegate uint XInputGetStateDelegate(uint dwUserIndex, ref XINPUT_STATE pState);
 
         private static XInputGetStateDelegate _xinputGetState;
-        private static bool _xinputInitialized;
 
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
         private static extern IntPtr LoadLibrary(string lpFileName);
@@ -171,11 +172,13 @@ namespace GamepadDesktop
         [DllImport("kernel32.dll", CharSet = CharSet.Ansi)]
         private static extern IntPtr GetProcAddress(IntPtr hModule, string procName);
 
-        public static uint XInputGetStateSafe(uint dwUserIndex, ref XINPUT_STATE pState)
+        [DllImport("psapi.dll")]
+        public static extern int EmptyWorkingSet(IntPtr hwProc);
+
+        static NativeMethods()
         {
-            if (!_xinputInitialized)
+            try
             {
-                _xinputInitialized = true;
                 string[] dlls = new string[] { "xinput1_4.dll", "xinput9_1_0.dll", "xinput1_3.dll" };
                 foreach (string dll in dlls)
                 {
@@ -191,6 +194,13 @@ namespace GamepadDesktop
                     }
                 }
             }
+            catch { }
+        }
+
+        [HandleProcessCorruptedStateExceptions]
+        [SecurityCritical]
+        public static uint XInputGetStateSafe(uint dwUserIndex, ref XINPUT_STATE pState)
+        {
             if (_xinputGetState == null) return 1167;
             try
             {
@@ -469,6 +479,7 @@ namespace GamepadDesktop
                     _fadeTimer.Stop();
                     Opacity = 0;
                     Hide();
+                    try { NativeMethods.EmptyWorkingSet(Process.GetCurrentProcess().Handle); } catch { }
                 }
             };
         }
@@ -824,6 +835,11 @@ namespace GamepadDesktop
         private ToolStripMenuItem _menuToggleItem;
         private ToolStripMenuItem _menuStatusItem;
 
+        private int _disconnectedTicks = 0;
+        private bool _isSlowPolling = false;
+        private int _lastActiveMask = -1;
+        private string _cachedSourceName = "Yok";
+
         public GamepadDesktopContext()
         {
             _config = AppConfig.Load();
@@ -831,13 +847,20 @@ namespace GamepadDesktop
 
             _toast = new ToastOverlayForm();
             IntPtr h1 = _toast.Handle;
-            _toast.DeviceChanged += () => { _winmmRescanNeeded = true; };
+            _toast.DeviceChanged += () =>
+            {
+                _winmmRescanNeeded = true;
+                WakeUpPollTimer();
+            };
 
             _helpOverlay = new HelpOverlayForm();
             IntPtr h2 = _helpOverlay.Handle;
 
             BuildTrayIcon();
             UpdateTrayVisuals();
+
+            // Minimize initial working set to ~3-4MB
+            TrimMemory();
 
             _pollTimer = new System.Threading.Timer(PollTick, null, 100, _config.PollIntervalMs);
 
@@ -846,6 +869,27 @@ namespace GamepadDesktop
                 "Aç/Kapat: Start + Select (1 sn)  |  Yardım: LB + RB",
                 _desktopModeEnabled ? Color.FromArgb(46, 204, 113) : Color.FromArgb(47, 129, 247)
             );
+        }
+
+        public void TrimMemory()
+        {
+            try
+            {
+                GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced);
+                GC.WaitForPendingFinalizers();
+                NativeMethods.EmptyWorkingSet(Process.GetCurrentProcess().Handle);
+            }
+            catch { }
+        }
+
+        private void WakeUpPollTimer()
+        {
+            if (_isSlowPolling && _pollTimer != null)
+            {
+                _isSlowPolling = false;
+                _disconnectedTicks = 0;
+                try { _pollTimer.Change(0, _config.PollIntervalMs); } catch { }
+            }
         }
 
         private Icon CreateGamepadIcon(bool enabled)
@@ -1170,6 +1214,8 @@ namespace GamepadDesktop
             catch { }
         }
 
+        [HandleProcessCorruptedStateExceptions]
+        [SecurityCritical]
         private void PollTick(object state)
         {
             if (Interlocked.Exchange(ref _isPolling, 1) == 1) return;
@@ -1188,7 +1234,26 @@ namespace GamepadDesktop
                 {
                     ReleaseHeldInputsCleanly();
                     _prevButtons = PadButtons.None;
+
+                    _disconnectedTicks++;
+                    if (_disconnectedTicks > 5 && !_isSlowPolling)
+                    {
+                        _isSlowPolling = true;
+                        // Bağlı kol yokken CPU tüketimini sıfırlamak için 250ms aralığa geç
+                        try { if (_pollTimer != null) _pollTimer.Change(250, 250); } catch { }
+                    }
                     return;
+                }
+
+                if (_isSlowPolling)
+                {
+                    _isSlowPolling = false;
+                    _disconnectedTicks = 0;
+                    try { if (_pollTimer != null) _pollTimer.Change(0, _config.PollIntervalMs); } catch { }
+                }
+                else
+                {
+                    _disconnectedTicks = 0;
                 }
 
                 ProcessInput(pad);
@@ -1200,10 +1265,12 @@ namespace GamepadDesktop
             }
         }
 
+        [HandleProcessCorruptedStateExceptions]
+        [SecurityCritical]
         private UnifiedPadState ReadAllControllers()
         {
             UnifiedPadState combined = new UnifiedPadState();
-            List<string> activeSources = new List<string>();
+            int currentMask = 0;
             bool anyXInputConnected = false;
 
             for (uint i = 0; i < 4; i++)
@@ -1213,7 +1280,7 @@ namespace GamepadDesktop
                 {
                     anyXInputConnected = true;
                     combined.Connected = true;
-                    activeSources.Add("XInput #" + (i + 1));
+                    currentMask |= (1 << (int)i);
 
                     ushort b = st.Gamepad.wButtons;
                     if ((b & 0x0001) != 0) combined.Buttons |= PadButtons.DPadUp;
@@ -1284,10 +1351,7 @@ namespace GamepadDesktop
                         uint b = info.dwButtons;
 
                         combined.Connected = true;
-                        string devLabel = isLogitechOrSony
-                            ? (caps.wMid == 0x046D ? "Logitech (G29/DInput)" : "PlayStation Controller")
-                            : ("DInput #" + (id + 1));
-                        activeSources.Add(devLabel);
+                        currentMask |= (1 << (8 + (int)id));
 
                         if (!_winmmInitialAxes.ContainsKey(id))
                         {
@@ -1357,7 +1421,31 @@ namespace GamepadDesktop
                 }
             }
 
-            combined.SourceName = activeSources.Count > 0 ? string.Join(" + ", activeSources.ToArray()) : "Yok";
+            if (currentMask != _lastActiveMask)
+            {
+                _lastActiveMask = currentMask;
+                List<string> activeSources = new List<string>();
+                for (int i = 0; i < 4; i++)
+                {
+                    if ((currentMask & (1 << i)) != 0)
+                        activeSources.Add("XInput #" + (i + 1));
+                }
+                foreach (uint id in _validWinmmIds)
+                {
+                    if ((currentMask & (1 << (8 + (int)id))) != 0)
+                    {
+                        NativeMethods.JOYCAPSW caps = _winmmCaps[id];
+                        bool isLogitechOrSony = (caps.wMid == 0x046D || caps.wMid == 0x054C);
+                        string devLabel = isLogitechOrSony
+                            ? (caps.wMid == 0x046D ? "Logitech (G29/DInput)" : "PlayStation Controller")
+                            : ("DInput #" + (id + 1));
+                        activeSources.Add(devLabel);
+                    }
+                }
+                _cachedSourceName = activeSources.Count > 0 ? string.Join(" + ", activeSources.ToArray()) : "Yok";
+            }
+
+            combined.SourceName = _cachedSourceName;
             return combined;
         }
 
@@ -1836,6 +1924,14 @@ namespace GamepadDesktop
             {
                 return;
             }
+
+            try
+            {
+                AppDomain.CurrentDomain.UnhandledException += (s, e) => { };
+                Application.ThreadException += (s, e) => { };
+                Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+            }
+            catch { }
 
             try { NativeMethods.SetProcessDPIAware(); } catch { }
             Application.EnableVisualStyles();
